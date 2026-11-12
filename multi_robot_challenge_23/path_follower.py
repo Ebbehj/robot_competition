@@ -26,6 +26,12 @@ class PathFollowerNode(Node):
         self.max_linear_speed = 20.0         # Meter per sekund.
         self.turn_threshold = math.radians(15)
         self.max_pose_age = 0.5              # Simuleringssekunder.
+        self.state = "follow_path"
+
+        # Variabler for scan_POI
+        self.fase1 = False
+        self.checked_direction = False
+        self.direction = None
 
         # Publisher for første robots kjørekommandoer.
         self.cmd_publisher = self.create_publisher(
@@ -201,6 +207,7 @@ class PathFollowerNode(Node):
 
             if self.target_index >= len(self.route):
                 self.get_logger().info("Hele ruten er fullført.")
+                self.state = "scan_POI"
 
             # Neste timerkall behandler neste punkt.
             return
@@ -218,38 +225,97 @@ class PathFollowerNode(Node):
         # Lag en bevegelsesmelding, som i veggfølgeren.
         move_msg = Twist()
 
-        # P-regulator for retning.
-        # Positiv vinkelfeil gir venstresving.
-        angular_speed = self.Kp * angle_error
+        if self.state is "follow_path":
+            # P-regulator for retning.
+            # Positiv vinkelfeil gir venstresving.
+            angular_speed = self.Kp * angle_error
 
-        move_msg.angular.z = max(
-            -self.max_angular_speed,
-            min(self.max_angular_speed, angular_speed),
-        )
-
-        if abs(angle_error) > self.turn_threshold:
-            # Snu på stedet til roboten peker nær nok mot målet.
-            move_msg.linear.x = 0.0
-        else:
-            # Begrens farten og reduser den nær målpunktet.
-            move_msg.linear.x = min(
-                self.max_linear_speed,
-                0.5 * distance,
+            move_msg.angular.z = max(
+                -self.max_angular_speed,
+                min(self.max_angular_speed, angular_speed),
             )
 
-        # self.get_logger().info(
-        #     f"Neste punkt: {target['id']}, "
-        #     f"avstand: {distance:.2f} m, "
-        #     f"vinkelfeil: {math.degrees(angle_error):.1f} grader"
-        # )
+            if abs(angle_error) > self.turn_threshold:
+                # Snu på stedet til roboten peker nær nok mot målet.
+                move_msg.linear.x = 0.0
+            else:
+                # Begrens farten og reduser den nær målpunktet.
+                move_msg.linear.x = min(
+                    self.max_linear_speed,
+                    0.5 * distance,
+                )
 
-        # # Vis kommandoen før den publiseres til roboten.
-        # self.get_logger().info(
-        #     f"Beregnet kommando: fremover={move_msg.linear.x:.2f} m/s, "
-        #     f"sving={move_msg.angular.z:.2f} rad/s"
-        # )
+            # self.get_logger().info(
+            #     f"Neste punkt: {target['id']}, "
+            #     f"avstand: {distance:.2f} m, "
+            #     f"vinkelfeil: {math.degrees(angle_error):.1f} grader"
+            # )
 
-        # Send beregnet fart og svinging til roboten.
+            # # Vis kommandoen før den publiseres til roboten.
+            # self.get_logger().info(
+            #     f"Beregnet kommando: fremover={move_msg.linear.x:.2f} m/s, "
+            #     f"sving={move_msg.angular.z:.2f} rad/s"
+            # )
+
+            # Send beregnet fart og svinging til roboten.
+
+        else:
+
+            # dersom roboten allerede ser i riktig retning skal se rundt seg 
+            if angle_error < self.turn_threshold:
+                move_msg.angular.z = 2.0
+
+
+            # Fase 1, snu med korteste vei til roboten peker 90 grader fra ny heading
+            if self.fase1 is False:
+                
+                # finner ut om roboten skal snu til høyre eller venstre for å nå ny vinkel
+                if self.checked_direction is False:
+
+                    # turn away from heading if robot is closer than 90 degrees, and towards if not
+                    if angle_error < math.pi / 2:
+                        self.direction = -1
+                    else: 
+                        self.direction = 1
+                    self.checked_direction = True
+                    
+                angle_error = angle_error - math.pi / 2 # ny vinkel 90 grader nærmere enn originalvinkel
+
+                angular_speed = abs(angle_error)
+
+                move_msg.angular.z = self.direction * angular_speed
+
+                if angle_error < self.turn_threshold - math.radians(10):
+                    self.get_logger().info("ser 90 grader fra mål")
+                    self.fase1 = True
+                    self.direction = None
+                    self.checked_direction = False
+
+            # Fase 2, snu motsatt vei til roboten peker mot ny heading
+            else:
+
+                # dersom ny retning er nærmest fra høyre, snu til venstre, og motsatt
+                if self.checked_direction is False:
+                    if angle_error > 0:
+                        self.direction = -1
+                    else:
+                        self.direction = 1
+                    self.checked_direction = True
+
+                angular_speed = abs(angle_error)
+
+                move_msg.angular.z = self.direction * angular_speed
+                
+                if abs(angle_error) < self.turn_threshold:
+                    self.get_logger().info("ser mot mål")
+                    self.fase1 = False
+                    self.direction = None
+                    self.checked_direction = False
+                    self.state = "follow_path"
+
+                
+
+
         self.cmd_publisher.publish(move_msg)
 
 
