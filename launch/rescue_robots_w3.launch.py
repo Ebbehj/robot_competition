@@ -50,6 +50,18 @@ def generate_launch_description():
         parameters=[{"yaml_filename": map_file_path, "topic_name": "map", "frame_id": "map"}],
         # remappings=remappings
     )
+
+
+    coordinator = Node(
+        package='multi_robot_challenge_23',
+        executable='coordinator',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'start_xs': [float(first_tb3_pos[0]), float(second_tb3_pos[0])],
+            'start_ys': [float(first_tb3_pos[1]), float(second_tb3_pos[1])],
+        }],
+    )
     # Starting a lifecycle manager that takes care of the map server
     lifecycle_manager = Node(
         package='nav2_lifecycle_manager',
@@ -101,4 +113,5 @@ def generate_launch_description():
         tb3_0,
         tb3_1,
         rviz_node,
+        coordinator,
     ])

@@ -12,7 +12,7 @@ from std_msgs.msg import String
 from multi_robot_challenge_23.coverage_map import ROBOT_CLEARANCE
 
 from multi_robot_challenge_23.coverage_map import (
-    find_wall_cells, find_reachable, find_viewpoints, find_intrestpoints,find_peaks, FACTOR,   # NEW: FACTOR
+    find_wall_cells, find_reachable, find_viewpoints, find_intrestpoints,find_peaks, remove_near_spawn, FACTOR,   # NEW: FACTOR
 )
 
 from multi_robot_challenge_23.graph_builder import build_graph
@@ -26,7 +26,10 @@ class Coordinator(Node):
         self.viewpoints = []
         self.map_msg = None                          # NEW
         self.dist = None 
-        self.reachable = None                            # NEW
+        self.reachable = None   
+        self.peaks = [] 
+        self.declare_parameter('start_xs', [0.0, 0.0])
+        self.declare_parameter('start_ys', [-1.0, 1.0])                        # NEW
 
         self.declare_parameter('peak_radius', 2.5)   # NEW (meters)
 
@@ -73,12 +76,22 @@ class Coordinator(Node):
         self.map_msg = msg
         self.dist = dist
 
-        starts = [(0.0, -1.0), (0.0, -1.0)]
+        xs = self.get_parameter('start_xs').value
+        ys = self.get_parameter('start_ys').value
+        starts = list(zip(xs, ys))
         self.reachable = find_reachable(msg, free, starts)
+        
+
+
 
         cell_size = msg.info.resolution * FACTOR
         ox = msg.info.origin.position.x
         oy = msg.info.origin.position.y
+
+        radius_m = self.get_parameter('peak_radius').value
+        peaks = find_peaks(dist, radius_m / cell_size)
+        peaks = remove_near_spawn(msg, peaks)
+        self.peaks = [(r, c) for r, c in peaks if self.reachable[r, c]]
 
         self.viewpoints = [
             (x, y) for x, y in find_viewpoints(msg, free, starts)
@@ -145,9 +158,7 @@ class Coordinator(Node):
         oy = msg.info.origin.position.y
         max_steps = max(int(dist.max()), 1)
 
-        radius_m = self.get_parameter('peak_radius').value
-        peaks = find_peaks(dist, radius_m / cell_size)
-        peaks = [(r, c) for r, c in peaks if self.reachable[r, c]]
+        peaks = self.peaks
 
 
         marker = Marker()

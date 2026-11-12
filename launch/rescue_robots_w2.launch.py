@@ -49,6 +49,16 @@ def generate_launch_description():
         parameters=[{'use_sim_time': True}],
     )
     
+    coordinator = Node(
+        package='multi_robot_challenge_23',
+        executable='coordinator',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'start_xs': [float(first_tb3_pos[0]), float(second_tb3_pos[0])],
+            'start_ys': [float(first_tb3_pos[1]), float(second_tb3_pos[1])],
+        }],
+    )
 
     # Starting Map Server
     map_server = Node(
@@ -110,5 +120,5 @@ def generate_launch_description():
         tb3_0,
         tb3_1,
         rviz_node,
-        
+        coordinator,
     ])
