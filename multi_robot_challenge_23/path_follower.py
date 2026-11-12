@@ -261,7 +261,7 @@ class PathFollowerNode(Node):
 
         else:
 
-            # dersom roboten allerede ser i riktig retning skal se rundt seg 
+            # dersom roboten allerede ser i riktig retning skal den snu seg litt før den går videre til neste steg. Dette gjør den for å unngå feil senere 
             if angle_error < self.turn_threshold:
                 move_msg.angular.z = 2.0
 
