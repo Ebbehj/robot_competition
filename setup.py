@@ -38,6 +38,8 @@ setup(
             'map = multi_robot_challenge_23.map_marker:main',
             'live_map = multi_robot_challenge_23.live_map:main',
             'coordinator = multi_robot_challenge_23.coordinator:main',
+            'path_planner = multi_robot_challenge_23.path_planner:main',
+            'path_follower = multi_robot_challenge_23.path_follower:main',
 
 
 
