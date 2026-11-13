@@ -27,6 +27,7 @@ class PathFollowerNode(Node):
         self.turn_threshold = math.radians(15)
         self.max_pose_age = 0.5              # Simuleringssekunder.
         self.state = "follow_path"
+        self.lookahead_points = 5
 
         # Variabler for scan_POI
         self.fase1 = False
@@ -191,28 +192,40 @@ class PathFollowerNode(Node):
         #     f"retning={math.degrees(self.robot_yaw):.1f} grader"
         # )
 
-        # Velg punktet vi foreløpig er på vei mot.
-        target = self.route[self.target_index]
+        # Sjekk om vi har nådd neste rutepunkt.
+        while self.target_index < len(self.route):
+            target = self.route[self.target_index]
 
-        dx = target["x"] - self.robot_x
-        dy = target["y"] - self.robot_y
-        distance = math.hypot(dx, dy)
+            dx = target["x"] - self.robot_x
+            dy = target["y"] - self.robot_y
+            distance = math.hypot(dx, dy)
 
-        if distance <= self.position_tolerance:
-            # Stopp ved punktet før vi velger det neste.
-            self.stop_robot()
+            if distance > self.position_tolerance:
+                break
+
             self.get_logger().info(f"Nådde punkt: {target['id']}")
-
             self.target_index += 1
 
-            if self.target_index >= len(self.route):
-                self.get_logger().info("Hele ruten er fullført.")
-                self.state = "scan_POI"
-
-            # Neste timerkall behandler neste punkt.
+        # Stopp bare når hele ruten er fullført.
+        if self.target_index >= len(self.route):
+            self.stop_robot()
+            self.get_logger().info("Hele ruten er fullført.")
+            self.state = "scan_POI"
             return
 
-        # Beregn retningen fra roboten til målpunktet.
+        # Beregn gjennomsnittet av de neste 5 punktene.
+        next_points = self.route[
+            self.target_index:self.target_index + self.lookahead_points
+        ]
+
+        avg_x = sum(p["x"] for p in next_points) / len(next_points)
+        avg_y = sum(p["y"] for p in next_points) / len(next_points)
+
+        # Styr mot gjennomsnittet i stedet for neste punkt.
+        dx = avg_x - self.robot_x
+        dy = avg_y - self.robot_y
+        distance = math.hypot(dx, dy)
+
         target_angle = math.atan2(dy, dx)
         angle_error = target_angle - self.robot_yaw
 
@@ -225,7 +238,7 @@ class PathFollowerNode(Node):
         # Lag en bevegelsesmelding, som i veggfølgeren.
         move_msg = Twist()
 
-        if self.state is "follow_path":
+        if self.state == "follow_path":
             # P-regulator for retning.
             # Positiv vinkelfeil gir venstresving.
             angular_speed = self.Kp * angle_error
@@ -235,15 +248,10 @@ class PathFollowerNode(Node):
                 min(self.max_angular_speed, angular_speed),
             )
 
-            if abs(angle_error) > self.turn_threshold:
-                # Snu på stedet til roboten peker nær nok mot målet.
-                move_msg.linear.x = 0.0
-            else:
-                # Begrens farten og reduser den nær målpunktet.
-                move_msg.linear.x = min(
-                    self.max_linear_speed,
-                    0.5 * distance,
-                )
+            move_msg.linear.x = (
+                min(self.max_linear_speed, 0.5 * distance)
+                * max(0.0, math.cos(angle_error))
+            )
 
             # self.get_logger().info(
             #     f"Neste punkt: {target['id']}, "
@@ -263,7 +271,7 @@ class PathFollowerNode(Node):
 
             # dersom roboten allerede ser i riktig retning skal den snu seg litt før den går videre til neste steg. Dette gjør den for å unngå feil senere 
             if angle_error < self.turn_threshold:
-                move_msg.angular.z = 2.0
+                move_msg.angular.z = 5.0
 
 
             # Fase 1, snu med korteste vei til roboten peker 90 grader fra ny heading
