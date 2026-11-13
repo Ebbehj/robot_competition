@@ -12,7 +12,7 @@ from std_msgs.msg import String
 from multi_robot_challenge_23.coverage_map import ROBOT_CLEARANCE
 
 from multi_robot_challenge_23.coverage_map import (
-    find_wall_cells, find_reachable, find_viewpoints, find_intrestpoints,find_peaks, FACTOR,   # NEW: FACTOR
+    find_wall_cells, find_reachable, find_viewpoints, find_intrestpoints,find_peaks, assign_region_ids, FACTOR,   # NEW: FACTOR
 )
 
 from multi_robot_challenge_23.graph_builder import build_graph
@@ -45,7 +45,7 @@ class Coordinator(Node):
         self.marker_pub = self.create_publisher(Marker, 'viewpoint_markers', 10)
         self.dist_map_pub = self.create_publisher(OccupancyGrid, 'wall_distance_map', map_qos)
         self.dist_marker_pub = self.create_publisher(Marker, 'wall_distance_markers', map_qos)
-        self.create_timer(1.0, self.publish_viewpoints)
+        self.create_timer(1.0, self.publish_viewpoints) # Kommenter ut denne for å lettere se inndelingen av POI noder
 
         # Tom graf frem til kartet er behandlet.
         self.graph = {}
@@ -148,6 +148,7 @@ class Coordinator(Node):
         radius_m = self.get_parameter('peak_radius').value
         peaks = find_peaks(dist, radius_m / cell_size)
         peaks = [(r, c) for r, c in peaks if self.reachable[r, c]]
+        peaks_with_ids = assign_region_ids(peaks, dist.shape)
 
 
         marker = Marker()
@@ -162,7 +163,17 @@ class Coordinator(Node):
         marker.scale.y = cell_size * 0.9
         marker.scale.z = 0.05
 
-        for r, c in peaks:
+        colors = {
+            1: (1.0, 0.0, 0.0),  # Red
+            2: (1.0, 1.0, 1.0),  # White
+            3: (0.0, 0.0, 1.0),  # Blue
+            4: (1.0, 1.0, 0.0),  # Yellow
+            5: (1.0, 0.0, 1.0),  # Purple
+            6: (0.0, 1.0, 1.0),  # Cyan
+        }
+
+
+        for r, c, id in peaks_with_ids:
             p = Point()
             p.x = float(ox + (c + 0.5) * cell_size)
             p.y = float(oy + (r + 0.5) * cell_size)
@@ -170,7 +181,9 @@ class Coordinator(Node):
             marker.points.append(p)
 
             t = float(dist[r, c]) / max_steps
-            marker.colors.append(ColorRGBA(r=1.0 - t, g=t, b=0.0, a=1.0))
+
+            red, green, blue = colors[id]
+            marker.colors.append(ColorRGBA(r=red, g=green, b=blue, a=1.0))
 
         self.dist_marker_pub.publish(marker)
 

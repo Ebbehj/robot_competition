@@ -134,3 +134,29 @@ def find_peaks(dist, radius_cells):
         suppressed[r0:r1, c0:c1] |= disk[r0 - (r - R):r1 - (r - R),
                                          c0 - (c - R):c1 - (c - R)]
     return peaks
+
+def assign_region_ids(peaks, map_shape):
+     
+    if not peaks:
+        return []
+
+    rows = [r for r, c in peaks]
+    cols = [c for r, c in peaks]
+
+    min_r, max_r = min(rows), max(rows)
+    min_c, max_c = min(cols), max(cols)
+
+    height = max_r - min_r + 1
+    width = max_c - min_c + 1
+
+    result = []
+
+    for r, c in peaks:
+        row = min((r - min_r) * 2 // height, 1)
+        col = min((c - min_c) * 3 // width, 2)
+
+        region_id = int(row * 3 + col + 1)
+
+        result.append((r, c, region_id))
+
+    return result
