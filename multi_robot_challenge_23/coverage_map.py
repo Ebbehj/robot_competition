@@ -10,6 +10,7 @@ VIEWPOINT_STEP = 2
 
 VIEW_DISTANCE = 3.0
 
+SPAWN_EXCLUDE_RADIUS = 2.0
 
 def find_wall_cells(msg, factor=FACTOR):
     info = msg.info
@@ -58,6 +59,8 @@ def find_viewpoints(msg, free, starts, factor=FACTOR):
     xs = info.origin.position.x + (cols + 0.5) * cell_size
     ys = info.origin.position.y + (rows + 0.5) * cell_size
 
+   
+
     return list(zip(xs, ys))
 
 def wall_step_distance(wall_cells, free, max_steps):
@@ -103,7 +106,7 @@ def find_reachable(msg, free, starts, factor=FACTOR):
         reachable |= labels == label
 
     return reachable
-    
+
 def find_intrestpoints(msg):
     wall_cells, free = find_wall_cells(msg)
     cell_size = msg.info.resolution * FACTOR
@@ -160,3 +163,13 @@ def assign_region_ids(peaks, map_shape):
         result.append((r, c, region_id))
 
     return result
+def remove_near_spawn(msg, peaks, factor=FACTOR):
+    info = msg.info
+    cell_size = info.resolution * factor
+    kept = []
+    for r, c in peaks:
+        x = info.origin.position.x + (c + 0.5) * cell_size
+        y = info.origin.position.y + (r + 0.5) * cell_size
+        if np.hypot(x, y) > SPAWN_EXCLUDE_RADIUS:
+            kept.append((r, c))
+    return kept

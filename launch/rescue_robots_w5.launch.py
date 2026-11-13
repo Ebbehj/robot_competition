@@ -16,16 +16,28 @@ def generate_launch_description():
     map_file_path = os.path.join(get_package_share_directory(package_name), 'maps', 'map_dat160_w5.yaml')
     rviz_config_file_path = os.path.join(get_package_share_directory(package_name), 'rviz', 'model.rviz')
 
-    # Namespace of each robot
-    first_tb3 = 'tb3_0'
-    second_tb3 = 'tb3_1'
-    # Starting position in the gazebo world of each robot
-    first_tb3_pos = ['0.0', '-0.5', '0.0']
-    second_tb3_pos = ['0.0', '-2.5', '0.0']
-    #Starting orientation in the gazebo world of each robot
-    first_tb3_yaw = '0.0'
-    second_tb3_yaw = '0.0'
+    # Name, x, y and yaw for each robot
+    robots = [
+        ('tb3_0', '2.0', '-0.35', '0.0'),
+        ('tb3_1', '0.0', '-0.35', '0.0'),
+        ('tb3_2', '-1.0', '-0.85', '0.0'),
+        ('tb3_3', '2.0', '-2.5', '0.0'),
+        ('tb3_4', '0.0', '-2.5', '0.0'),
+        ('tb3_5', '-1.0', '-2.0', '0.0'),
+    ]
 
+    spawn_robots = [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource([os.path.join(get_package_share_directory(package_name), 'launch'), '/spawn_robot.launch.py']),
+            launch_arguments={
+                'namespace': name,
+                'x': x,
+                'y': y,
+                'yaw': yaw,
+            }.items()
+        )
+        for name, x, y, yaw in robots
+    ]
     # Declaring use_sim_time as a launch argument that can then be used in all launch files
     sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -50,6 +62,17 @@ def generate_launch_description():
         parameters=[{"yaml_filename": map_file_path, "topic_name": "map", "frame_id": "map"}],
         # remappings=remappings
     )
+
+    coordinator = Node(
+        package='multi_robot_challenge_23',
+        executable='coordinator',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'start_xs': [float(x) for _, x, _, _ in robots],
+            'start_ys': [float(y) for _, _, y, _ in robots],
+        }],
+    )
     # Starting a lifecycle manager that takes care of the map server
     lifecycle_manager = Node(
         package='nav2_lifecycle_manager',
@@ -61,28 +84,7 @@ def generate_launch_description():
                     {'node_names': ["map_server"]}]
     )
 
-    # Spawning the first robot
-    tb3_0 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([os.path.join(get_package_share_directory(package_name), 'launch'), '/spawn_robot.launch.py']),
-        launch_arguments={
-            'namespace': first_tb3,
-            'x': first_tb3_pos[0],
-            'y': first_tb3_pos[1],
-            'yaw': first_tb3_yaw,
-        }.items()
-    )
-
-    # Spawning the second robot 
-    tb3_1 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([os.path.join(get_package_share_directory(package_name), 'launch'), '/spawn_robot.launch.py']),
-        launch_arguments={
-            'namespace': second_tb3,
-            'x': second_tb3_pos[0],
-            'y': second_tb3_pos[1],
-            'yaw': second_tb3_yaw,
-        }.items()
-    )
-
+   
     # Starting rviz
     rviz_node = Node(
         package='rviz2',
@@ -98,7 +100,7 @@ def generate_launch_description():
         gazebo,
         map_server,
         lifecycle_manager,
-        tb3_0,
-        tb3_1,
+        *spawn_robots,
         rviz_node,
+        coordinator,
     ])
