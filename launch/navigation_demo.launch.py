@@ -27,6 +27,12 @@ def generate_launch_description():
         parameters=[{"use_sim_time": True}],
     )
 
+    image = Node(
+        package=package,
+        executable="image_display",
+        output="screen",
+    )
+
     # Noder kan starte samtidig: planleggeren venter på kart/graf/TF,
     # og rutefølgeren venter på en rute. Ingen veggfølger startes her.
-    return LaunchDescription([coordinator, planner, follower])
+    return LaunchDescription([coordinator, planner, follower, image])

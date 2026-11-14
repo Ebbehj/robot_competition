@@ -40,7 +40,7 @@ setup(
             'coordinator = multi_robot_challenge_23.coordinator:main',
             'path_planner = multi_robot_challenge_23.path_planner:main',
             'path_follower = multi_robot_challenge_23.path_follower:main',
-
+            'image_display = multi_robot_challenge_23.image_display:main',
 
 
         ],
