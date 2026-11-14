@@ -34,6 +34,7 @@ class PathFollowerNode(Node):
         self.fase1 = False
         self.checked_direction = False
         self.direction = None
+        self.max_scanPIO_speed = 1.5
 
         # Publisher for første robots kjørekommandoer.
         self.cmd_publisher = self.create_publisher(
@@ -288,35 +289,35 @@ class PathFollowerNode(Node):
 
                     # turn away from heading if robot is closer than 90 degrees, and towards if not
                     if angle_error < math.pi / 2:
-                        self.direction = -1
-                    else: 
-                        self.direction = 1
+                        self.direction = -1 if angle_error >= 0 else 1
+                    else:
+                        self.direction = 1 if angle_error >= 0 else 1
                     self.checked_direction = True
                     
-                angle_error = angle_error - math.pi / 2 # ny vinkel 90 grader nærmere enn originalvinkel
+                phase1_error = abs(abs(angle_error) - math.pi / 2) # ny vinkel 90 grader nærmere enn originalvinkel
 
-                angular_speed = abs(angle_error)
+                angular_speed = min(abs(phase1_error), self.max_scanPIO_speed)
 
                 move_msg.angular.z = self.direction * angular_speed
 
-                if angle_error < self.turn_threshold - math.radians(10):
+                if phase1_error < self.turn_threshold - math.radians(10):
                     self.get_logger().info("ser 90 grader fra mål")
                     self.fase1 = True
-                    self.direction = None
                     self.checked_direction = False
+                    
 
             # Fase 2, snu motsatt vei til roboten peker mot ny heading
             else:
 
                 # dersom ny retning er nærmest fra høyre, snu til venstre, og motsatt
                 if self.checked_direction is False:
-                    if angle_error > 0:
-                        self.direction = -1
+                    if angle_error < math.pi / 2 + self.turn_threshold:
+                        self.direction = -1 if angle_error >= 0 else 1
                     else:
-                        self.direction = 1
+                        self.direction = 1 if angle_error >= 0 else 1
                     self.checked_direction = True
 
-                angular_speed = abs(angle_error)
+                angular_speed = min(abs(angle_error), self.max_scanPIO_speed)
 
                 move_msg.angular.z = self.direction * angular_speed
                 
