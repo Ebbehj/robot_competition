@@ -21,6 +21,7 @@ class PathFollowerNode(Node):
 
         # Innstillinger for styringen.
         self.position_tolerance = 1.0        # Meter fra punktet.
+        self.last_node_tolerance = 0.1
         self.Kp = 1.0                        # Forsterkning av vinkelfeilen.
         self.max_angular_speed = 3.0         # Radianer per sekund.
         self.max_linear_speed = 20.0         # Meter per sekund.
@@ -200,7 +201,12 @@ class PathFollowerNode(Node):
             dy = target["y"] - self.robot_y
             distance = math.hypot(dx, dy)
 
-            if distance > self.position_tolerance:
+            #minker posisjonstoleranse dersom den går mot siste punktet i rutelisten
+            if self.target_index == len(self.route) - 1:
+                if distance > self.last_node_tolerance:
+                    break
+
+            elif distance > self.position_tolerance:
                 break
 
             self.get_logger().info(f"Nådde punkt: {target['id']}")
