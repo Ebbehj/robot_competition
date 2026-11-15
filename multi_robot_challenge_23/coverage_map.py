@@ -10,7 +10,7 @@ VIEWPOINT_STEP = 2
 
 VIEW_DISTANCE = 3.0
 
-SPAWN_EXCLUDE_RADIUS = 2.0
+SPAWN_EXCLUDE_RADIUS = 3.0
 
 def find_wall_cells(msg, factor=FACTOR):
     info = msg.info
