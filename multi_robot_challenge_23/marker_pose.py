@@ -1,5 +1,8 @@
+from collections import deque
+
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
@@ -11,55 +14,70 @@ from std_msgs.msg import Int64
 
 import tf2_geometry_msgs
 
+
 class MarkerMapPose(Node):
     def __init__(self):
         super().__init__('MarkerMapPose')
 
-        #Initiate a ROS parameter with a default value and then read the parameters value
+        # Initiate a ROS parameter with a default value and then read the parameters value
         self.declare_parameter('namespace', 'tb3_5')
         self.namespace = self.get_parameter('namespace').get_parameter_value().string_value
 
-        self.marker_id = 1000
-        self.marker_pose = Pose()
-        self.marker_recieved = False
+        self.camera_frame = self.namespace + '/camera_rgb_optical_frame'
+        self.map_frame = 'map'
 
-        self.marker_recognition_sub = self.create_subscription(ArucoMarkers, '/'+self.namespace+'/aruco_markers', self.clbk_marker_recognition, 10)
-        self.marker_map_pose_pub = self.create_publisher(Pose, '/'+self.namespace+'/marker_map_pose', 10)
-        self.marker_id_pub = self.create_publisher(Int64,'/'+self.namespace+'/marker_id', 10)
+        # Detections that are waiting for their transform to arrive.
+        self.pending = deque(maxlen=10)
 
-        #Initialize a transform listener that is later used for looking up tranformations from one frame to another
+        self.marker_recognition_sub = self.create_subscription(
+            ArucoMarkers, '/' + self.namespace + '/aruco_markers', self.clbk_marker_recognition, 10)
+        self.marker_map_pose_pub = self.create_publisher(
+            Pose, '/' + self.namespace + '/marker_map_pose', 10)
+        self.marker_id_pub = self.create_publisher(
+            Int64, '/' + self.namespace + '/marker_id', 10)
+
+        # Transform listener used for looking up transformations from one frame to another
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        timer_period = 0.1  # seconds
-        self.timer = self.create_timer(timer_period, self.timer_callback)
-
-
     def clbk_marker_recognition(self, msg):
-        self.marker_id = msg.marker_ids[0]
-        self.marker_pose = msg.poses[0]
+        # No timer: work is only done when a marker is actually detected.
+        self.pending.append(msg)
 
-    def timer_callback(self):
-        marker_map_pose = Pose()
-        from_frame_rel = self.namespace+'/camera_rgb_optical_frame'
-        to_frame_rel = 'map'
-        marker_id_msg = Int64()
+        # Try every waiting detection. Keep the ones whose transform isn't there yet.
+        still_waiting = deque(maxlen=self.pending.maxlen)
+        for detection in self.pending:
+            if not self.publish_markers(detection):
+                still_waiting.append(detection)
+        self.pending = still_waiting
 
-        #Lookup the tranformation from from_frame_rel to to_frame_rel
+    def publish_markers(self, msg):
+        """Transform all markers in msg to the map frame and publish them.
+
+        Uses the camera position from the moment the image was taken, so the
+        result stays correct while the robot is driving or turning.
+        Returns False if the transform for that moment isn't available yet.
+        """
         try:
-            self.trans_camera_map = self.tf_buffer.lookup_transform(to_frame_rel, from_frame_rel, rclpy.time.Time())
-        except TransformException as ex:
-            self.get_logger().info(
-                f'Could not transform {to_frame_rel} to {from_frame_rel}: {ex}')
-            return
+            trans = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.camera_frame,
+                Time.from_msg(msg.header.stamp),
+            )
+        except TransformException:
+            return False
 
-        #Tranform a Pose from from_frame_rel to to_frame_rel
-        marker_map_pose = tf2_geometry_msgs.do_transform_pose(self.marker_pose, self.trans_camera_map)
+        for marker_id, pose in zip(msg.marker_ids, msg.poses):
+            # Publish the pose first, so it is in place when the ID arrives.
+            map_pose = tf2_geometry_msgs.do_transform_pose(pose, trans)
+            self.marker_map_pose_pub.publish(map_pose)
 
-        if self.marker_id != 1000:
-            self.marker_map_pose_pub.publish(marker_map_pose)
-            marker_id_msg.data = self.marker_id
-            self.marker_id_pub.publish(marker_id_msg)
+            id_msg = Int64()
+            id_msg.data = int(marker_id)
+            self.marker_id_pub.publish(id_msg)
+
+        return True
+
 
 def main(args=None):
     rclpy.init(args=args)

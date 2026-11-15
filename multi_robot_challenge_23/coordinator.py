@@ -21,7 +21,7 @@ WALL_CHECK_DISTANCE = 2.0   # Metres behind the robot
 
 # Robot index -> region
 REGIONS_OPEN = {0: 5, 1: 6, 2: 4, 3: 2, 4: 3, 5: 1}   # No wall behind robot 2 or 5
-REGIONS_WALL = {0: 4, 1: 5, 2: 6, 3: 1, 4: 2, 5: 1}    # Wall behind robot 2 or 5
+REGIONS_WALL = {0: 4, 1: 5, 2: 6, 3: 1, 4: 2, 5: 3}    # Wall behind robot 2 or 5
 
 # Farge per region i RViz.
 REGION_COLORS = {
