@@ -27,7 +27,8 @@ class Coordinator(Node):
         self.map_msg = None                          # NEW
         self.dist = None 
         self.reachable = None   
-        self.peaks = [] 
+        self.peaks = []
+        self.peaks_with_ids = []
         self.declare_parameter('start_xs', [0.0, 0.0])
         self.declare_parameter('start_ys', [-1.0, 1.0])                        # NEW
 
@@ -81,9 +82,6 @@ class Coordinator(Node):
         starts = list(zip(xs, ys))
         self.reachable = find_reachable(msg, free, starts)
         
-
-
-
         cell_size = msg.info.resolution * FACTOR
         ox = msg.info.origin.position.x
         oy = msg.info.origin.position.y
@@ -92,23 +90,39 @@ class Coordinator(Node):
         peaks = find_peaks(dist, radius_m / cell_size)
         peaks = remove_near_spawn(msg, peaks)
         self.peaks = [(r, c) for r, c in peaks if self.reachable[r, c]]
+        self.peaks_with_ids = assign_region_ids(self.peaks, dist.shape)
 
         self.viewpoints = [
             (x, y) for x, y in find_viewpoints(msg, free, starts)
             if self.reachable[int((y - oy) / cell_size), int((x - ox) / cell_size)]
         ]
 
-        # Lag grafen fra kartet og de eksisterende observasjonspunktene.
+        # Lag grafen
         self.graph, self.positions = build_graph(msg, self.viewpoints)
 
-        # Send forbindelser og koordinater samlet til planleggeren.
+        # Konverter peaks til kartkoordinater
+        peaks_data = []
+
+        for r, c, region_id in self.peaks_with_ids:
+            x = float(ox + (c + 0.5) * cell_size)
+            y = float(oy + (r + 0.5) * cell_size)
+
+            peaks_data.append({
+                "x": x,
+                "y": y,
+                "region_id": int(region_id)
+            })
+
+        # Send graf og peaks til PathPlannerNode
         graph_msg = String()
         graph_msg.data = json.dumps({
             "frame_id": "map",
             "clearance": ROBOT_CLEARANCE,
             "graph": self.graph,
             "positions": self.positions,
+            "peaks": peaks_data
         })
+
         self.graph_pub.publish(graph_msg)
 
         # Hver forbindelse er lagret begge veier, så vi deler på to.

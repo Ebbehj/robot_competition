@@ -12,7 +12,7 @@ from rclpy.time import Time
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformListener, TransformException
 
 from multi_robot_challenge_23.graph_builder import corridor_is_free
@@ -56,6 +56,13 @@ class PathPlannerNode(Node):
         self.clearance = 0.5
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.peaks = []
+        self.declare_parameter("assigned_region", 1)
+        self.started = False
+        self.create_timer(0.5, self.try_start_navigation)
+        self.last_graph_data = None
+        self.peak_index = 0 # Hvilket peak i regionen roboten skal besøke
+        self.awaiting_completion = False# Venter vi på at en automatisk planlagt rute skal fullføres?
 
         # Motta også siste kart/graf hvis de ble publisert før oppstart.
         saved_qos = QoSProfile(
@@ -68,6 +75,7 @@ class PathPlannerNode(Node):
         self.create_subscription(OccupancyGrid, "/map", self.map_callback, saved_qos)
         self.create_subscription(String, "priority_goal", self.goal_callback, 10)
         self.create_subscription(PointStamped, "/clicked_point", self.clicked_callback, 10)
+        self.create_subscription(Empty, "route_completed", self.route_completed_callback, 10)
         self.get_logger().info("Venter på kart og graf. Velg deretter Publish Point i RViz.")
 
     def publish_route(self, path):
@@ -85,7 +93,17 @@ class PathPlannerNode(Node):
         self.get_logger().warning(reason)
 
     def map_callback(self, msg):
-        # Avbryt gammel rute ved nytt kart.
+        # Ikke stopp roboten hvis kartet er uendret
+        if (
+            self.map_msg is not None
+            and msg.header.frame_id == self.map_msg.header.frame_id
+            and msg.info == self.map_msg.info
+            and np.array_equal(msg.data, self.map_msg.data)
+        ):
+            return
+
+        # Kartet er nytt eller endret
+        self.started = False
         self.publish_route([])
         self.map_msg = None
         self.grid = None
@@ -97,12 +115,22 @@ class PathPlannerNode(Node):
         self.get_logger().info("Kart mottatt.")
 
     def graph_callback(self, msg):
-        # Ikke behold en gammel rute hvis grafen endres eller er ugyldig.
+       
+        # Ignorer grafen hvis den er identisk med forrige
+        if msg.data == self.last_graph_data:
+            return
+
+        # Grafen er ny eller endret
+        self.last_graph_data = None
+        self.started = False
+
         self.publish_route([])
         self.graph = {}
         self.positions = {}
+        self.peaks = []
         try:
             data = json.loads(msg.data)
+            peaks = data.get("peaks", [])
             graph = data["graph"]
             positions = data["positions"]
             clearance = float(data["clearance"])
@@ -124,7 +152,13 @@ class PathPlannerNode(Node):
         self.graph = graph
         self.positions = positions
         self.clearance = clearance
+        self.peaks = peaks
+        self.last_graph_data = msg.data
         self.get_logger().info(f"Kartgraf klar: {len(graph)} noder.")
+
+        self.get_logger().info(f"Antall peaks mottatt: {len(self.peaks)}")
+        region_peaks = self.get_region_peaks()
+        self.get_logger().info(f"Antall peaks i min region: {len(region_peaks)}")
 
     def clicked_callback(self, msg):
         # Klikket velger nærmeste eksisterende node, ikke et nytt rutepunkt.
@@ -145,8 +179,17 @@ class PathPlannerNode(Node):
         self.plan_to_goal(goal)
 
     def goal_callback(self, msg):
-        # Fremtidig prioriteringsnode kan fortsatt sende en node-ID hit.
-        self.plan_to_goal(msg.data)
+        if msg.data == "region_peak":
+            region_peaks = self.get_region_peaks()
+
+            if region_peaks and self.positions:
+                self.plan_to_peak(region_peaks[0])
+            else:
+                self.get_logger().warning(
+                    "Ingen peaks funnet i robotens region."
+                )
+        else:
+            self.plan_to_goal(msg.data)
 
     def plan_to_goal(self, goal):
         self.publish_route([])
@@ -166,7 +209,7 @@ class PathPlannerNode(Node):
         # Tillat små tidsavvik mellom TF og simuleringens klokke.
         if age < -0.1 or age > 0.5:
             self.reject(f"TF-alder: {age:.3f} sekunder")
-            return
+            return False
         position = transform.transform.translation
         robot = (position.x, position.y)
         info = self.map_msg.info
@@ -190,9 +233,95 @@ class PathPlannerNode(Node):
                 f"Rute: {' -> '.join(path)}. Grafkostnad: {cost:.2f} m. "
                 "Robotens forbindelse til startnoden er også kartkontrollert."
             )
-            return
+            return True
         self.reject("Ingen farbar tilkobling til en grafdel som når målet. Ingen kjøring.")
 
+    def get_region_peaks(self):
+        region = self.get_parameter("assigned_region").value
+
+        return [
+            peak for peak in self.peaks
+            if peak["region_id"] == region
+        ]
+
+    def plan_to_peak(self, peak):
+        if not self.positions:
+            return False
+
+        x = peak["x"]
+        y = peak["y"]
+
+        goal = min(
+            self.positions,
+            key=lambda node: math.hypot(
+                self.positions[node][0] - x,
+                self.positions[node][1] - y
+            )
+        )
+
+        self.get_logger().info(
+            f"Region {peak['region_id']} -> grafnode {goal}"
+        )
+
+        return self.plan_to_goal(goal)
+
+    def try_start_navigation(self):
+
+        # Ikke start en ny rute hvis vi allerede har startet
+        if self.started:
+            return
+
+        # Vent på kart og graf
+        if self.map_msg is None or not self.graph:
+            return
+
+        # Hent alle peaks i robotens region
+        region_peaks = self.get_region_peaks()
+
+        if not region_peaks:
+            return
+
+        # Har roboten besøkt alle peaks?
+        if self.peak_index >= len(region_peaks):
+
+            self.get_logger().info(
+                "Alle peaks i regionen er besøkt!"
+            )
+
+            self.started = True
+            return
+
+        # Velg neste peak
+        peak = region_peaks[self.peak_index]
+
+        self.get_logger().info(
+            f"Planlegger rute til peak "
+            f"{self.peak_index + 1}/{len(region_peaks)}: {peak}"
+        )
+
+        # Beregn ruten
+        success = self.plan_to_peak(peak)
+
+        if success:
+            self.started = True
+            self.awaiting_completion = True
+
+    def route_completed_callback(self, msg):
+
+        if not self.awaiting_completion:
+            return
+
+        self.awaiting_completion = False
+
+        # Gå videre til neste peak
+        self.peak_index += 1
+
+        self.get_logger().info(
+            f"Rute fullført. Neste peak-indeks: {self.peak_index}"
+        )
+
+        # Tillat automatisk planlegging av neste rute
+        self.started = False
 
 def main(args=None):
     # Brukes både av ros2 run og launch-filen.

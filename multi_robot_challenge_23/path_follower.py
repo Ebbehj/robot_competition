@@ -6,7 +6,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -52,6 +52,12 @@ class PathFollowerNode(Node):
             String,
             "planned_path",
             self.route_callback,
+            10,
+        )
+
+        self.route_completed_pub = self.create_publisher(
+            Empty,
+            "route_completed",
             10,
         )
 
@@ -213,11 +219,18 @@ class PathFollowerNode(Node):
             self.get_logger().info(f"Nådde punkt: {target['id']}")
             self.target_index += 1
 
-        # Stopp bare når hele ruten er fullført.
+        # Stopp når hele ruten er fullført.
         if self.target_index >= len(self.route):
             self.stop_robot()
+
             self.get_logger().info("Hele ruten er fullført.")
+
+            # Bytt state
             self.state = "scan_POI"
+
+            # Gi beskjed til PathPlanner
+            self.route_completed_pub.publish(Empty())
+
             return
 
         # Beregn gjennomsnittet av de neste 5 punktene.
