@@ -14,7 +14,7 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformListener, TransformException
-
+from std_msgs.msg import String, Empty, Int32
 from multi_robot_challenge_23.graph_builder import corridor_is_free
 
 
@@ -57,26 +57,49 @@ class PathPlannerNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.peaks = []
-        self.declare_parameter("assigned_region", 1)
+        self.assigned_region = None       
         self.started = False
         self.create_timer(0.5, self.try_start_navigation)
         self.last_graph_data = None
         self.peak_index = 0 # Hvilket peak i regionen roboten skal besøke
         self.awaiting_completion = False# Venter vi på at en automatisk planlagt rute skal fullføres?
-
+        
+        
         # Motta også siste kart/graf hvis de ble publisert før oppstart.
         saved_qos = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
         )
+                # Replaces self.declare_parameter("assigned_region", 1)
+        self.assigned_region = None
+
+        # After saved_qos is defined
+        self.create_subscription(Int32, "assigned_region", self.region_callback, saved_qos)
+        
+        self.robot_name = self.get_namespace().strip("/")
+
         self.path_pub = self.create_publisher(String, "planned_path", 10)
-        self.create_subscription(String, "navigation_graph", self.graph_callback, saved_qos)
+        self.create_subscription(String, "/navigation_graph", self.graph_callback, saved_qos)
         self.create_subscription(OccupancyGrid, "/map", self.map_callback, saved_qos)
         self.create_subscription(String, "priority_goal", self.goal_callback, 10)
         self.create_subscription(PointStamped, "/clicked_point", self.clicked_callback, 10)
         self.create_subscription(Empty, "route_completed", self.route_completed_callback, 10)
         self.get_logger().info("Venter på kart og graf. Velg deretter Publish Point i RViz.")
+
+
+    def region_callback(self, msg):
+        self.assigned_region = msg.data
+        self.peak_index = 0
+        self.started = False
+        self.get_logger().info(f"Tildelt region {msg.data}")
+
+    def get_region_peaks(self):
+        return [
+            peak for peak in self.peaks
+            if peak["region_id"] == self.assigned_region
+        ]
+
 
     def publish_route(self, path):
         # Samme melding som rutefølgeren allerede leser.
@@ -200,7 +223,9 @@ class PathPlannerNode(Node):
             self.reject(f"Ukjent målnode: {goal}")
             return
         try:
-            transform = self.tf_buffer.lookup_transform("map", "tb3_0/base_footprint", Time())
+            transform = self.tf_buffer.lookup_transform(
+                "map", f"{self.robot_name}/base_footprint", Time()
+            )        
         except TransformException:
             self.reject("Robotposisjon mangler. Prøv målet igjen om et øyeblikk.")
             return
@@ -236,13 +261,7 @@ class PathPlannerNode(Node):
             return True
         self.reject("Ingen farbar tilkobling til en grafdel som når målet. Ingen kjøring.")
 
-    def get_region_peaks(self):
-        region = self.get_parameter("assigned_region").value
-
-        return [
-            peak for peak in self.peaks
-            if peak["region_id"] == region
-        ]
+    
 
     def plan_to_peak(self, peak):
         if not self.positions:

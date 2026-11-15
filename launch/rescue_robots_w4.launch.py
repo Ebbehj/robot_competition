@@ -22,8 +22,8 @@ def generate_launch_description():
         ('tb3_0', '0.75', '0.5', '0.0'),
         ('tb3_1', '0.0', '0.5', '0.0'),
         ('tb3_2', '-1.75', '0.2', '0.0'),
-        ('tb3_3', '0.75', '-1.4', '0.0'),
-        ('tb3_4', '0.0', '-1.4', '0.0'),
+        ('tb3_3', '0.0', '-1.4', '0.0'),
+        ('tb3_4', '0.75', '-1.4', '0.0'),
         ('tb3_5', '-1.75', '-0.75', '0.0'),
     ]
 
@@ -73,6 +73,8 @@ def generate_launch_description():
             'use_sim_time': True,
             'start_xs': [float(x) for _, x, _, _ in robots],
             'start_ys': [float(y) for _, _, y, _ in robots],
+            'robot_names': [name for name, _, _, _ in robots],
+
         }],
     )
     # Starting a lifecycle manager that takes care of the map server
@@ -98,6 +100,28 @@ def generate_launch_description():
         output='screen'
     )
 
+    tf_remaps = [('tf', '/tf'), ('tf_static', '/tf_static')]
+
+    robot_nodes = []
+    for region, (name, x, y, yaw) in enumerate(robots, start=1):
+        robot_nodes.append(Node(
+            package='multi_robot_challenge_23',
+            executable='path_planner',
+            namespace=name,
+            output='screen',
+            parameters=[{'use_sim_time': True}],
+            remappings=tf_remaps,
+        ))
+        robot_nodes.append(Node(
+            package='multi_robot_challenge_23',
+            executable='path_follower',
+            namespace=name,
+            output='screen',
+            parameters=[{'use_sim_time': True}],
+            remappings=tf_remaps,
+        ))
+
+
     return LaunchDescription([
         sim_time_arg,
         gazebo,
@@ -106,4 +130,5 @@ def generate_launch_description():
         *spawn_robots,
         rviz_node,
         coordinator,
+        *robot_nodes
     ])

@@ -10,341 +10,229 @@ from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
+def clamp(value, limit):
+    """Begrens value til intervallet [-limit, limit]."""
+    return max(-limit, min(limit, value))
+
+
+def sign(value):
+    return 1.0 if value >= 0 else -1.0
+
+
+def normalize_angle(angle):
+    """Normaliser til [-pi, pi] for å velge korteste sving."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 class PathFollowerNode(Node):
     def __init__(self):
         super().__init__("path_follower")
 
-        # Ruten inneholder punkter med feltene id, x og y.
-        # Koordinatene skal være uttrykt i kartets "map"-system.
+        # Robotens navn fra namespace, f.eks. "/tb3_2" -> "tb3_2".
+        self.robot_name = self.get_namespace().strip("/")
+        self.base_frame = f"{self.robot_name}/base_footprint"
+
+        # Ruten inneholder punkter med id, x og y i "map"-systemet.
         self.route = []
         self.target_index = 0
+        self.state = "follow_path"
+        self.scan_phase = 1
 
         # Innstillinger for styringen.
-        self.position_tolerance = 1.0        # Meter fra punktet.
-        self.last_node_tolerance = 0.1
-        self.Kp = 1.0                        # Forsterkning av vinkelfeilen.
-        self.max_angular_speed = 3.0         # Radianer per sekund.
-        self.max_linear_speed = 20.0         # Meter per sekund.
+        self.position_tolerance = 1.0              # Meter, mellompunkter.
+        self.last_node_tolerance = 0.1             # Meter, siste punkt.
+        self.Kp = 1.0                              # Forsterkning av vinkelfeilen.
+        self.max_angular_speed = 3.0               # rad/s
+        self.max_linear_speed = 20              # m/s (TurtleBot3 maks ~0.26)
+        self.max_scan_speed = 1.5                  # rad/s under scan_POI
         self.turn_threshold = math.radians(15)
-        self.max_pose_age = 0.5              # Simuleringssekunder.
-        self.state = "follow_path"
+        self.scan_threshold = math.radians(5)
+        self.max_pose_age = 0.5                    # Simuleringssekunder.
         self.lookahead_points = 5
 
-        # Variabler for scan_POI
-        self.fase1 = False
-        self.checked_direction = False
-        self.direction = None
-        self.max_scanPIO_speed = 1.5
-
-        # Publisher for første robots kjørekommandoer.
-        self.cmd_publisher = self.create_publisher(
-            Twist,
-            "/tb3_0/cmd_vel",
-            10,
-        )
+        # Relative navn: blir f.eks. /tb3_2/cmd_vel med namespace tb3_2.
+        self.cmd_publisher = self.create_publisher(Twist, "cmd_vel", 10)
+        self.done_publisher = self.create_publisher(Empty, "route_completed", 10)
+        self.create_subscription(String, "planned_path", self.route_callback, 10)
 
         # TF gir robotens posisjon og retning i kartet.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Motta ruter fra planleggeren.
-        self.route_subscription = self.create_subscription(
-            String,
-            "planned_path",
-            self.route_callback,
-            10,
-        )
+        # Kjøres 10 ganger per simuleringssekund.
+        self.create_timer(0.1, self.update)
 
-        self.route_completed_pub = self.create_publisher(
-            Empty,
-            "route_completed",
-            10,
-        )
-
-
-        # Den kaller update_pose 10 ganger per simuleringssekund.
-        self.pose_timer = self.create_timer(0.1, self.update_pose)
-
-        self.get_logger().info("Rutefølgeren venter på en rute.")
+        self.get_logger().info(f"Rutefølger for {self.robot_name} venter på en rute.")
 
     def stop_robot(self):
-        # Alle hastigheter i en ny Twist er null.
         self.cmd_publisher.publish(Twist())
 
-    def reject_route(self, reason):
-        # En ugyldig ny rute skal ikke la den gamle fortsette.
-        self.route = []
-        self.target_index = 0
-        self.stop_robot()
-        self.get_logger().warning(reason)
-
+    # ------------------------------------------------------------------
+    # Ruter
+    # ------------------------------------------------------------------
     def route_callback(self, msg):
         # Planleggeren sender JSON-tekst i en String-melding.
         try:
             route = json.loads(msg.data)
-        except json.JSONDecodeError:
-            self.reject_route("Mottok ugyldig JSON.")
+            self.validate_route(route)
+        except (json.JSONDecodeError, ValueError, OverflowError) as error:
+            # En ugyldig ny rute skal ikke la den gamle fortsette.
+            self.route = []
+            self.target_index = 0
+            self.stop_robot()
+            self.get_logger().warning(f"Ugyldig rute: {error}")
             return
 
-        if not isinstance(route, list):
-            self.reject_route("Ruten må være en liste.")
-            return
-
-        # Kontroller hele ruten før vi tar den i bruk.
-        for point in route:
-            if not isinstance(point, dict):
-                self.reject_route("Et rutepunkt må være en ordbok.")
-                return
-
-            if not all(key in point for key in ("id", "x", "y")):
-                self.reject_route("Et rutepunkt mangler id, x eller y.")
-                return
-
-            if not isinstance(point["id"], str):
-                self.reject_route("Node-ID må være tekst.")
-                return
-
-            # Koordinater må være tall, men ikke boolske verdier.
-            # NaN og uendelige verdier kan ikke brukes til styring.
-            for axis in ("x", "y"):
-                value = point[axis]
-
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                ):
-                    self.reject_route(
-                        f"Koordinaten {axis} må være et tall."
-                    )
-                    return
-
-                try:
-                    finite = math.isfinite(value)
-                except OverflowError:
-                    finite = False
-
-                if not finite:
-                    self.reject_route(
-                        f"Koordinaten {axis} må være et endelig tall."
-                    )
-                    return
-
-        # Stopp før den gamle ruten erstattes.
         self.stop_robot()
         self.route = route
         self.target_index = 0
 
-        if not self.route:
+        if not route:
             self.get_logger().info("Mottok tom rute. Roboten stoppes.")
             return
 
-        self.get_logger().info("Kjører")
+        self.get_logger().info(f"Mottok {len(route)} rutepunkter.")
 
-        self.get_logger().info(
-            f"Mottok {len(self.route)} rutepunkter."
+    @staticmethod
+    def validate_route(route):
+        if not isinstance(route, list):
+            raise ValueError("ruten må være en liste")
+
+        for point in route:
+            if not isinstance(point, dict) or not all(k in point for k in ("id", "x", "y")):
+                raise ValueError("hvert punkt må ha id, x og y")
+            if not isinstance(point["id"], str):
+                raise ValueError("node-ID må være tekst")
+
+            for axis in ("x", "y"):
+                value = point[axis]
+                # Tall, men ikke bool, NaN eller uendelig.
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
+                    raise ValueError(f"{axis} må være et endelig tall")
+
+    # ------------------------------------------------------------------
+    # Posisjon
+    # ------------------------------------------------------------------
+    def get_pose(self):
+        """Returnerer (x, y, yaw) i map, eller None hvis posisjonen mangler eller er gammel."""
+        try:
+            transform = self.tf_buffer.lookup_transform("map", self.base_frame, Time())
+        except TransformException:
+            return None
+
+        # Noden må bruke simuleringstid, som TF-dataene.
+        age = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds / 1e9
+        if age > self.max_pose_age or age < -0.1:
+            return None
+
+        p = transform.transform.translation
+        q = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
         )
+        return p.x, p.y, yaw
 
-        for point in self.route:
-            self.get_logger().info(
-                f"Node {point['id']}: x={point['x']}, y={point['y']}"
-            )
-
-    def update_pose(self):
-        # Ingen rute å følge: send stopp og avslutt oppdateringen.
+    # ------------------------------------------------------------------
+    # Hovedløkke
+    # ------------------------------------------------------------------
+    def update(self):
+        # Ingen rute å følge.
         if self.target_index >= len(self.route):
             self.stop_robot()
             return
 
-
-        try:
-            # Time() ber om den nyeste tilgjengelige transformasjonen.
-            # Resultatet beskriver roboten i kartets koordinatsystem.
-            transform = self.tf_buffer.lookup_transform(
-                "map",
-                "tb3_0/base_footprint",
-                Time(),
-            )
-        except TransformException:
-            # Ikke styr roboten hvis posisjonen ikke kan hentes.
+        pose = self.get_pose()
+        if pose is None:
+            # Ikke styr roboten uten fersk posisjon.
             self.stop_robot()
             return
+        x, y, yaw = pose
 
-        # Kontroller at posisjonen er fersk.
-        # Noden må bruke simuleringstid, som TF-dataene.
-        pose_time = Time.from_msg(transform.header.stamp)
-        pose_age = (
-            self.get_clock().now() - pose_time
-        ).nanoseconds / 1_000_000_000
+        self.advance_targets(x, y)
 
-        # Samme toleranse som i planleggeren.
-        if pose_age > self.max_pose_age or pose_age < -0.1:
+        # Hele ruten er fullført: stopp, gi beskjed én gang og scan ved neste rute.
+        if self.target_index >= len(self.route):
             self.stop_robot()
+            self.get_logger().info("Hele ruten er fullført.")
+            self.state = "scan_POI"
+            self.scan_phase = 1
+            self.done_publisher.publish(Empty())
             return
 
-        position = transform.transform.translation
-        rotation = transform.transform.rotation
+        angle_error, distance = self.aim(x, y, yaw)
 
-        self.robot_x = position.x
-        self.robot_y = position.y
+        if self.state == "follow_path":
+            cmd = self.follow(angle_error, distance)
+        else:
+            cmd = self.scan(angle_error)
 
-        # Konverter quaternion til yaw: retning i kartplanet.
-        # Yaw lagres i radianer til styringsberegningene.
-        self.robot_yaw = math.atan2(
-            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
-            1.0 - 2.0 * (rotation.y**2 + rotation.z**2),
-        )
+        self.cmd_publisher.publish(cmd)
 
-        # self.get_logger().info(
-        #     f"Robot: x={self.robot_x:.2f}, "
-        #     f"y={self.robot_y:.2f}, "
-        #     f"retning={math.degrees(self.robot_yaw):.1f} grader"
-        # )
-
-        # Sjekk om vi har nådd neste rutepunkt.
+    def advance_targets(self, x, y):
+        """Hopp over rutepunkter roboten allerede er nær nok."""
         while self.target_index < len(self.route):
             target = self.route[self.target_index]
+            distance = math.hypot(target["x"] - x, target["y"] - y)
 
-            dx = target["x"] - self.robot_x
-            dy = target["y"] - self.robot_y
-            distance = math.hypot(dx, dy)
+            # Strengere toleranse for siste punkt.
+            is_last = self.target_index == len(self.route) - 1
+            tolerance = self.last_node_tolerance if is_last else self.position_tolerance
 
-            #minker posisjonstoleranse dersom den går mot siste punktet i rutelisten
-            if self.target_index == len(self.route) - 1:
-                if distance > self.last_node_tolerance:
-                    break
-
-            elif distance > self.position_tolerance:
+            if distance > tolerance:
                 break
 
             self.get_logger().info(f"Nådde punkt: {target['id']}")
             self.target_index += 1
 
-        # Stopp når hele ruten er fullført.
-        if self.target_index >= len(self.route):
-            self.stop_robot()
+    def aim(self, x, y, yaw):
+        """Vinkelfeil og avstand til gjennomsnittet av de neste punktene."""
+        points = self.route[self.target_index:self.target_index + self.lookahead_points]
+        avg_x = sum(p["x"] for p in points) / len(points)
+        avg_y = sum(p["y"] for p in points) / len(points)
 
-            self.get_logger().info("Hele ruten er fullført.")
+        dx = avg_x - x
+        dy = avg_y - y
+        angle_error = normalize_angle(math.atan2(dy, dx) - yaw)
+        return angle_error, math.hypot(dx, dy)
 
-            # Bytt state
-            self.state = "scan_POI"
-
-            # Gi beskjed til PathPlanner
-            self.route_completed_pub.publish(Empty())
-
-            return
-
-        # Beregn gjennomsnittet av de neste 5 punktene.
-        next_points = self.route[
-            self.target_index:self.target_index + self.lookahead_points
-        ]
-
-        avg_x = sum(p["x"] for p in next_points) / len(next_points)
-        avg_y = sum(p["y"] for p in next_points) / len(next_points)
-
-        # Styr mot gjennomsnittet i stedet for neste punkt.
-        dx = avg_x - self.robot_x
-        dy = avg_y - self.robot_y
-        distance = math.hypot(dx, dy)
-
-        target_angle = math.atan2(dy, dx)
-        angle_error = target_angle - self.robot_yaw
-
-        # Normaliser til [-pi, pi] for å velge korteste sving.
-        angle_error = math.atan2(
-            math.sin(angle_error),
-            math.cos(angle_error),
+    def follow(self, angle_error, distance):
+        """P-regulator: positiv vinkelfeil gir venstresving."""
+        cmd = Twist()
+        cmd.angular.z = clamp(self.Kp * angle_error, self.max_angular_speed)
+        # Kjør saktere jo mer feil retning roboten peker.
+        cmd.linear.x = (
+            min(self.max_linear_speed, 0.5 * distance)
+            * max(0.0, math.cos(angle_error))
         )
+        return cmd
 
-        # Lag en bevegelsesmelding, som i veggfølgeren.
-        move_msg = Twist()
+    def scan(self, angle_error):
+        """Snur 90 grader bort fra ny retning, og deretter tilbake mot den."""
+        cmd = Twist()
 
-        if self.state == "follow_path":
-            # P-regulator for retning.
-            # Positiv vinkelfeil gir venstresving.
-            angular_speed = self.Kp * angle_error
+        if self.scan_phase == 1:
+            # Negativ: nærmere enn 90 grader, snu bort. Positiv: snu mot.
+            error = abs(angle_error) - math.pi / 2
+            cmd.angular.z = sign(angle_error) * clamp(error, self.max_scan_speed)
 
-            move_msg.angular.z = max(
-                -self.max_angular_speed,
-                min(self.max_angular_speed, angular_speed),
-            )
-
-            move_msg.linear.x = (
-                min(self.max_linear_speed, 0.5 * distance)
-                * max(0.0, math.cos(angle_error))
-            )
-
-            # self.get_logger().info(
-            #     f"Neste punkt: {target['id']}, "
-            #     f"avstand: {distance:.2f} m, "
-            #     f"vinkelfeil: {math.degrees(angle_error):.1f} grader"
-            # )
-
-            # # Vis kommandoen før den publiseres til roboten.
-            # self.get_logger().info(
-            #     f"Beregnet kommando: fremover={move_msg.linear.x:.2f} m/s, "
-            #     f"sving={move_msg.angular.z:.2f} rad/s"
-            # )
-
-            # Send beregnet fart og svinging til roboten.
-
+            if abs(error) < self.scan_threshold:
+                self.get_logger().info("Ser 90 grader fra mål.")
+                self.scan_phase = 2
         else:
+            # Snu korteste vei mot ny retning.
+            cmd.angular.z = clamp(angle_error, self.max_scan_speed)
 
-            # dersom roboten allerede ser i riktig retning skal den snu seg litt før den går videre til neste steg. Dette gjør den for å unngå feil senere 
-            if angle_error < self.turn_threshold:
-                move_msg.angular.z = 5.0
+            if abs(angle_error) < self.turn_threshold:
+                self.get_logger().info("Ser mot mål.")
+                self.state = "follow_path"
+                self.scan_phase = 1
 
-
-            # Fase 1, snu med korteste vei til roboten peker 90 grader fra ny heading
-            if self.fase1 is False:
-                
-                # finner ut om roboten skal snu til høyre eller venstre for å nå ny vinkel
-                if self.checked_direction is False:
-
-                    # turn away from heading if robot is closer than 90 degrees, and towards if not
-                    if angle_error < math.pi / 2:
-                        self.direction = -1 if angle_error >= 0 else 1
-                    else:
-                        self.direction = 1 if angle_error >= 0 else 1
-                    self.checked_direction = True
-                    
-                phase1_error = abs(abs(angle_error) - math.pi / 2) # ny vinkel 90 grader nærmere enn originalvinkel
-
-                angular_speed = min(abs(phase1_error), self.max_scanPIO_speed)
-
-                move_msg.angular.z = self.direction * angular_speed
-
-                if phase1_error < self.turn_threshold - math.radians(10):
-                    self.get_logger().info("ser 90 grader fra mål")
-                    self.fase1 = True
-                    self.checked_direction = False
-                    
-
-            # Fase 2, snu motsatt vei til roboten peker mot ny heading
-            else:
-
-                # dersom ny retning er nærmest fra høyre, snu til venstre, og motsatt
-                if self.checked_direction is False:
-                    if angle_error < math.pi / 2 + self.turn_threshold:
-                        self.direction = -1 if angle_error >= 0 else 1
-                    else:
-                        self.direction = 1 if angle_error >= 0 else 1
-                    self.checked_direction = True
-
-                angular_speed = min(abs(angle_error), self.max_scanPIO_speed)
-
-                move_msg.angular.z = self.direction * angular_speed
-                
-                if abs(angle_error) < self.turn_threshold:
-                    self.get_logger().info("ser mot mål")
-                    self.fase1 = False
-                    self.direction = None
-                    self.checked_direction = False
-                    self.state = "follow_path"
-
-                
-
-
-        self.cmd_publisher.publish(move_msg)
+        return cmd
 
 
 def main(args=None):
@@ -365,6 +253,7 @@ def main(args=None):
             node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
