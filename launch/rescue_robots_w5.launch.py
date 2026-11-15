@@ -18,12 +18,13 @@ def generate_launch_description():
 
     # Name, x, y and yaw for each robot
     robots = [
-        ('tb3_0', '2.0', '-0.35', '0.0'),
-        ('tb3_1', '0.0', '-0.35', '0.0'),
+        ('tb3_0', '0.0', '-0.35', '0.0'),
+        ('tb3_1', '2.0', '-0.35', '0.0'),
         ('tb3_2', '-1.0', '-0.85', '0.0'),
-        ('tb3_3', '2.0', '-2.5', '0.0'),
-        ('tb3_4', '0.0', '-2.5', '0.0'),
-        ('tb3_5', '-1.0', '-2.0', '0.0'),
+        ('tb3_3', '0.0', '-2.5', '0.0'),
+        ('tb3_4', '2.0', '-2.5', '0.0'),
+        ('tb3_5', '-1.0', '-1.8', '0.0'),
+        ('tb3_6', '-0.20', '-1.25', '0.0'),
     ]
 
     spawn_robots = [
@@ -72,6 +73,7 @@ def generate_launch_description():
             'start_xs': [float(x) for _, x, _, _ in robots],
             'start_ys': [float(y) for _, _, y, _ in robots],
             'robot_names': [name for name, _, _, _ in robots],
+            'reserve_robot': 'tb3_6',
 
 
 

@@ -8,9 +8,14 @@ ROBOT_CLEARANCE = 0.50
 MAX_WALL_DISTANCE = 2.0
 VIEWPOINT_STEP = 2
 
-VIEW_DISTANCE = 3.0
+VIEW_DISTANCE = 2.0s
 
 SPAWN_EXCLUDE_RADIUS = 3.0
+
+GRID_NEIGHBOURS = {
+    1: {2, 4}, 2: {1, 3, 5}, 3: {2, 6},
+    4: {1, 5}, 5: {2, 4, 6}, 6: {3, 5},
+}
 
 def find_wall_cells(msg, factor=FACTOR):
     info = msg.info
@@ -137,7 +142,49 @@ def find_peaks(dist, radius_cells):
         suppressed[r0:r1, c0:c1] |= disk[r0 - (r - R):r1 - (r - R),
                                          c0 - (c - R):c1 - (c - R)]
     return peaks
+import math
 
+def balance_regions(peaks, region_ids, neighbours=None):
+    """
+    peaks:       list of (r, c)
+    region_ids:  list of region id per peak (same order as peaks)
+    neighbours:  dict {region_id: set of neighbouring region_ids}.
+                 If None, regions with consecutive ids (k and k+1) are neighbours.
+
+    While any region has more than 1 peak more than a neighbour, move the peak
+    in the bigger region that lies closest to the smaller region to that region.
+    """
+    ids = list(region_ids)
+    regions = sorted(set(ids))
+
+    if neighbours is None:
+        neighbours = {k: {n for n in (k - 1, k + 1) if n in regions} for k in regions}
+
+    def members(k):
+        return [i for i, rid in enumerate(ids) if rid == k]
+
+    def centroid(k):
+        m = members(k)
+        if not m:
+            return None
+        return (sum(peaks[i][0] for i in m) / len(m),
+                sum(peaks[i][1] for i in m) / len(m))
+
+    changed = True
+    while changed:
+        changed = False
+        for big in regions:
+            for small in neighbours.get(big, ()):
+                big_m, small_m = members(big), members(small)
+                if len(big_m) - len(small_m) > 1:
+                    target = centroid(small)
+                    if target is None:          # empty neighbour: use big's centroid
+                        target = centroid(big)
+                    # peak in big region closest to the small region
+                    give = min(big_m, key=lambda i: math.dist(peaks[i], target))
+                    ids[give] = small
+                    changed = True
+    return ids
 def assign_region_ids(peaks, map_shape):
      
     if not peaks:
@@ -162,7 +209,14 @@ def assign_region_ids(peaks, map_shape):
 
         result.append((r, c, region_id))
 
-    return result
+    ids = balance_regions(
+        [(r, c) for r, c, _ in result],
+        [rid for _, _, rid in result],
+        GRID_NEIGHBOURS,
+    )
+
+    return [(r, c, rid) for (r, c, _), rid in zip(result, ids)]
+
 def remove_near_spawn(msg, peaks, factor=FACTOR):
     info = msg.info
     cell_size = info.resolution * factor

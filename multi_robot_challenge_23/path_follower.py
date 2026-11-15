@@ -8,7 +8,6 @@ from rclpy.time import Time
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformException, TransformListener
-from sensor_msgs.msg import LaserScan
 
 
 def clamp(value, limit):
@@ -26,6 +25,15 @@ def normalize_angle(angle):
 
 
 class PathFollowerNode(Node):
+    """Følger ruter fra planleggeren.
+
+    Tilstander:
+      follow_path  kjører langs ruten
+      spin         full runde på stedet etter at en rute er fullført
+      align        snur korteste vei mot neste rute før den kjører
+    Uten rute snurrer roboten sakte mens den venter.
+    """
+
     def __init__(self):
         super().__init__("path_follower")
 
@@ -37,30 +45,28 @@ class PathFollowerNode(Node):
         self.route = []
         self.target_index = 0
         self.state = "follow_path"
-        self.scan_phase = 1
 
-        # Innstillinger for styringen.
+        # Innstillinger for kjøring.
         self.position_tolerance = 1.0              # Meter, mellompunkter.
         self.last_node_tolerance = 0.1             # Meter, siste punkt.
         self.Kp = 1.0                              # Forsterkning av vinkelfeilen.
         self.max_angular_speed = 3.0               # rad/s
-        self.max_linear_speed = 20              # m/s (TurtleBot3 maks ~0.26)
-        self.max_scan_speed = 1.5                  # rad/s under scan_POI
-        self.turn_threshold = math.radians(15)
-        self.scan_threshold = math.radians(5)
+        self.max_linear_speed = 20.0           # m/s
         self.max_pose_age = 0.5                    # Simuleringssekunder.
         self.lookahead_points = 5
 
-        # Placeholder for lidar verdi
-        self.lidar_front = 100
-        self.lidar_frontRight = 100
-        self.lidar_frontLeft = 100
+        # Innstillinger for snurring.
+        self.spin_speed = 1.0                      # rad/s, full runde ved et peak
+        self.idle_spin_speed = 0.8                 # rad/s, mens roboten venter på rute
+        self.min_align_speed = 0.3                 # rad/s, så den ikke kryper på slutten
+        self.align_threshold = math.radians(10)    # Nær nok riktig retning
+        self.spin_remaining = 0.0
+        self.last_yaw = 0.0
 
         # Relative navn: blir f.eks. /tb3_2/cmd_vel med namespace tb3_2.
         self.cmd_publisher = self.create_publisher(Twist, "cmd_vel", 10)
         self.done_publisher = self.create_publisher(Empty, "route_completed", 10)
         self.create_subscription(String, "planned_path", self.route_callback, 10)
-        self.sub = self.create_subscription(LaserScan, "/scan", self.clbk_laser, 10)
 
         # TF gir robotens posisjon og retning i kartet.
         self.tf_buffer = Buffer()
@@ -74,10 +80,10 @@ class PathFollowerNode(Node):
     def stop_robot(self):
         self.cmd_publisher.publish(Twist())
 
-    def clbk_laser(self, msg):
-            self.lidar_front = msg.ranges[0]
-            self.lidar_frontRight = msg.ranges[330]
-            self.lidar_frontLeft = msg.ranges[30]
+    def turn(self, angular_speed):
+        cmd = Twist()
+        cmd.angular.z = angular_speed
+        self.cmd_publisher.publish(cmd)
 
     # ------------------------------------------------------------------
     # Ruter
@@ -95,12 +101,11 @@ class PathFollowerNode(Node):
             self.get_logger().warning(f"Ugyldig rute: {error}")
             return
 
-        self.stop_robot()
         self.route = route
         self.target_index = 0
 
         if not route:
-            self.get_logger().info("Mottok tom rute. Roboten stoppes.")
+            self.get_logger().info("Mottok tom rute.")
             return
 
         self.get_logger().info(f"Mottok {len(route)} rutepunkter.")
@@ -153,37 +158,43 @@ class PathFollowerNode(Node):
     # Hovedløkke
     # ------------------------------------------------------------------
     def update(self):
-        # Ingen rute å følge.
-        if self.target_index >= len(self.route):
-            self.stop_robot()
+        pose = self.get_pose()
+
+        # Full runde ved et peak. Neste rute kan komme mens roboten snurrer.
+        if self.state == "spin":
+            self.spin(pose)
             return
 
-        pose = self.get_pose()
+        # Ingen rute: snurr sakte og se etter markører mens roboten venter.
+        if self.target_index >= len(self.route):
+            self.turn(self.idle_spin_speed)
+            return
+
         if pose is None:
-            # Ikke styr roboten uten fersk posisjon.
+            # Ikke kjør uten fersk posisjon.
             self.stop_robot()
             return
         x, y, yaw = pose
 
         self.advance_targets(x, y)
 
-        # Hele ruten er fullført: stopp, gi beskjed én gang og scan ved neste rute.
+        # Ruten er fullført: be om neste rute med én gang, og ta en full runde.
         if self.target_index >= len(self.route):
-            self.stop_robot()
-            self.get_logger().info("Hele ruten er fullført.")
-            self.state = "scan_POI"
-            self.scan_phase = 1
+            self.get_logger().info("Hele ruten er fullført. Ser rundt.")
+            self.route = []
+            self.target_index = 0
+            self.state = "spin"
+            self.spin_remaining = 2 * math.pi
+            self.last_yaw = yaw
             self.done_publisher.publish(Empty())
             return
 
         angle_error, distance = self.aim(x, y, yaw)
 
-        if self.state == "follow_path":
-            cmd = self.follow(angle_error, distance)
+        if self.state == "align":
+            self.align(angle_error)
         else:
-            cmd = self.scan(angle_error)
-
-        self.cmd_publisher.publish(cmd)
+            self.cmd_publisher.publish(self.follow(angle_error, distance))
 
     def advance_targets(self, x, y):
         """Hopp over rutepunkter roboten allerede er nær nok."""
@@ -215,12 +226,7 @@ class PathFollowerNode(Node):
     def follow(self, angle_error, distance):
         """P-regulator: positiv vinkelfeil gir venstresving."""
         cmd = Twist()
-
-        if max(self.lidar_front, self.lidar_frontLeft, self.lidar_frontRight) > 0.3:
-            cmd.angular.z = 2.0
-        else:
-            cmd.angular.z = clamp(self.Kp * angle_error, self.max_angular_speed)
-
+        cmd.angular.z = clamp(self.Kp * angle_error, self.max_angular_speed)
         # Kjør saktere jo mer feil retning roboten peker.
         cmd.linear.x = (
             min(self.max_linear_speed, 0.5 * distance)
@@ -228,28 +234,38 @@ class PathFollowerNode(Node):
         )
         return cmd
 
-    def scan(self, angle_error):
-        """Snur 90 grader bort fra ny retning, og deretter tilbake mot den."""
-        cmd = Twist()
+    # ------------------------------------------------------------------
+    # Snurring
+    # ------------------------------------------------------------------
+    def spin(self, pose):
+        """Snurrer en full runde på stedet."""
+        if pose is None:
+            self.stop_robot()
+            return
 
-        if self.scan_phase == 1:
-            # Negativ: nærmere enn 90 grader, snu bort. Positiv: snu mot.
-            error = abs(angle_error) - math.pi / 2
-            cmd.angular.z = sign(angle_error) * clamp(error, self.max_scan_speed)
+        # Trekk fra hvor langt roboten har snudd siden forrige oppdatering.
+        yaw = pose[2]
+        self.spin_remaining -= abs(normalize_angle(yaw - self.last_yaw))
+        self.last_yaw = yaw
 
-            if abs(error) < self.scan_threshold:
-                self.get_logger().info("Ser 90 grader fra mål.")
-                self.scan_phase = 2
-        else:
-            # Snu korteste vei mot ny retning.
-            cmd.angular.z = clamp(angle_error, self.max_scan_speed)
+        if self.spin_remaining <= 0:
+            self.get_logger().info("Ferdig med å se rundt.")
+            # Neste steg: pek mot neste rute før roboten kjører.
+            self.state = "align"
+            return
 
-            if abs(angle_error) < self.turn_threshold:
-                self.get_logger().info("Ser mot mål.")
-                self.state = "follow_path"
-                self.scan_phase = 1
+        self.turn(self.spin_speed)
 
-        return cmd
+    def align(self, angle_error):
+        """Snur korteste vei til roboten peker i retningen den skal kjøre."""
+        if abs(angle_error) < self.align_threshold:
+            self.get_logger().info("Peker mot neste rute.")
+            self.state = "follow_path"
+            self.stop_robot()
+            return
+
+        speed = max(self.min_align_speed, min(abs(angle_error), self.spin_speed))
+        self.turn(sign(angle_error) * speed)
 
 
 def main(args=None):

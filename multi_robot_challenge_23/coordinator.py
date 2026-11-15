@@ -1,14 +1,17 @@
 import json
 import math
+import time
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.time import Time
 
 from geometry_msgs.msg import Point
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import ColorRGBA, Int32, String
+from tf2_ros import Buffer, TransformListener, TransformException
 from visualization_msgs.msg import Marker
 
 from multi_robot_challenge_23.coverage_map import (
@@ -21,7 +24,13 @@ WALL_CHECK_DISTANCE = 2.0   # Metres behind the robot
 
 # Robot index -> region
 REGIONS_OPEN = {0: 5, 1: 6, 2: 4, 3: 2, 4: 3, 5: 1}   # No wall behind robot 2 or 5
-REGIONS_WALL = {0: 4, 1: 5, 2: 6, 3: 1, 4: 2, 5: 3}    # Wall behind robot 2 or 5
+REGIONS_WALL = {0: 4, 1: 5, 2: 6, 3: 1, 4: 2, 5: 3}   # Wall behind robot 2 or 5
+
+# Stor brann (marker 4)
+FIRE_DELAY = 0.0    # Sekunder fra brannen er funnet til robotene sendes
+FIRE_RADIUS = 1.5    # Meter. Scoring krever at begge er innenfor 2.0
+# Robotene scoring-noden følger med på. Originalen følger bare tb3_0 til tb3_4.
+SCORED_ROBOTS = {'tb3_0', 'tb3_1', 'tb3_2', 'tb3_3', 'tb3_4', 'tb3_5', 'tb3_6'}
 
 # Farge per region i RViz.
 REGION_COLORS = {
@@ -51,12 +60,20 @@ class Coordinator(Node):
         self.graph = {}
         self.positions = {}
 
+        # Stor brann
+        self.fire_pos = None     # (x, y) når brannen er funnet
+        self.fire_time = None    # Tidspunktet den ble funnet
+        self.fire_team = None    # (hjelper, standby) når de er sendt
+        self.fire_done = False
+
         # Settes fra launch-filen.
         self.declare_parameter('start_xs', [0.0, 0.0])
         self.declare_parameter('start_ys', [-1.0, 1.0])
         self.declare_parameter('robot_names', ['tb3_0', 'tb3_1'])
+        self.declare_parameter('reserve_robot', 'tb3_6')
         self.declare_parameter('peak_radius', 2.5)   # Meter
         self.robot_names = self.get_parameter('robot_names').value
+        self.reserve_robot = self.get_parameter('reserve_robot').value
 
         # Transient local: noder som starter senere får også siste melding.
         map_qos = QoSProfile(
@@ -66,6 +83,7 @@ class Coordinator(Node):
         )
 
         self.create_subscription(OccupancyGrid, '/map', self.clbk_map, map_qos)
+        self.create_subscription(Point, '/big_fire_found', self.clbk_big_fire, 10)
 
         # Graf og peaks til alle planleggerne.
         self.graph_pub = self.create_publisher(String, 'navigation_graph', map_qos)
@@ -80,6 +98,10 @@ class Coordinator(Node):
             for name in self.robot_names
         }
 
+        # TF gir robotenes posisjon i kartet.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # Visualisering i RViz.
         self.marker_pub = self.create_publisher(Marker, 'viewpoint_markers', 10)
         self.edge_pub = self.create_publisher(Marker, 'graph_edges', 10)
@@ -90,6 +112,7 @@ class Coordinator(Node):
         self.create_timer(1.0, self.publish_viewpoints)
         self.create_timer(1.0, self.publish_edges)
         self.create_timer(1.0, self.publish_dist_markers)
+        self.create_timer(1.0, self.check_fire_team)
 
     # ------------------------------------------------------------------
     # Kart
@@ -151,6 +174,7 @@ class Coordinator(Node):
         self.graph_pub.publish(graph_msg)
 
         self.assign_regions(starts)
+
         # Hver forbindelse er lagret begge veier, så vi deler på to.
         connection_count = sum(len(n) for n in self.graph.values()) // 2
         isolated_count = sum(1 for n in self.graph.values() if not n)
@@ -165,7 +189,7 @@ class Coordinator(Node):
         )
 
     # ------------------------------------------------------------------
-    # Oppgaver til robotene
+    # Regioner
     # ------------------------------------------------------------------
     def wall_behind(self, x, y):
         """True if there is a wall within WALL_CHECK_DISTANCE in the -x direction."""
@@ -183,10 +207,9 @@ class Coordinator(Node):
             self.wall_behind(*starts[i]) for i in (2, 5) if i < len(starts)
         )
         mapping = REGIONS_WALL if blocked else REGIONS_OPEN
-        self.get_logger().info(
-            f"Vegg bak robot 2 eller 5: {blocked}"
-        )
+        self.get_logger().info(f'Vegg bak robot 2 eller 5: {blocked}')
 
+        # Roboter uten plass i tabellen, som standby-roboten, får ingen region.
         for i, name in enumerate(self.robot_names):
             if i not in mapping:
                 continue
@@ -194,11 +217,95 @@ class Coordinator(Node):
             msg.data = mapping[i]
             self.region_pubs[name].publish(msg)
             self.get_logger().info(f'{name} -> region {mapping[i]}')
+
     def send_goal(self, robot_name, node_id):
-        """Ber én robot kjøre til en bestemt grafnode."""
+        """Ber én robot kjøre til en bestemt grafnode, eller 'resume'."""
         msg = String()
         msg.data = node_id
         self.goal_pubs[robot_name].publish(msg)
+
+    # ------------------------------------------------------------------
+    # Stor brann
+    # ------------------------------------------------------------------
+    def robot_position(self, name):
+        """Robotens (x, y) i kartet, eller None hvis posisjonen mangler."""
+        try:
+            t = self.tf_buffer.lookup_transform('map', f'{name}/base_footprint', Time())
+        except TransformException:
+            return None
+        return t.transform.translation.x, t.transform.translation.y
+
+    def nodes_near(self, x, y, count=2, spacing=0.6):
+        """De nærmeste grafnodene, med nok avstand til at to roboter får plass."""
+        def dist(node):
+            return math.hypot(self.positions[node][0] - x, self.positions[node][1] - y)
+
+        chosen = []
+        for node in sorted(self.positions, key=dist):
+            if not self.graph[node]:
+                continue   # Isolert node
+            px, py = self.positions[node]
+            if all(math.hypot(px - self.positions[c][0], py - self.positions[c][1]) >= spacing
+                   for c in chosen):
+                chosen.append(node)
+            if len(chosen) == count:
+                break
+        return chosen
+
+    def clbk_big_fire(self, msg):
+        # Kalles når en robot har fått marker 4 godkjent.
+        if self.fire_pos is not None or not self.graph:
+            return
+
+        self.fire_pos = (msg.x, msg.y)
+        self.fire_time = time.time()
+        self.get_logger().info(f'Stor brann funnet. Sender roboter om {FIRE_DELAY:.0f} s.')
+
+    def dispatch_fire_team(self):
+        fire_x, fire_y = self.fire_pos
+
+        # Nærmeste søkerobot akkurat nå, blant dem scoring-noden følger.
+        distances = {}
+        for name in self.robot_names:
+            if name == self.reserve_robot or name not in SCORED_ROBOTS:
+                continue
+            pos = self.robot_position(name)
+            if pos is not None:
+                distances[name] = math.hypot(pos[0] - fire_x, pos[1] - fire_y)
+
+        nodes = self.nodes_near(fire_x, fire_y)
+        if not distances or len(nodes) < 2:
+            self.get_logger().warning('Fant ikke robot eller noder til brannen.')
+            return
+
+        helper = min(distances, key=distances.get)
+        self.send_goal(helper, nodes[0])
+        self.send_goal(self.reserve_robot, nodes[1])
+        self.fire_team = (helper, self.reserve_robot)
+        self.get_logger().info(f'Stor brann: {helper} og {self.reserve_robot} sendes dit.')
+
+    def check_fire_team(self):
+        if self.fire_pos is None or self.fire_done:
+            return
+
+        # Venter på forsinkelsen, og sender deretter laget.
+        if self.fire_team is None:
+            if time.time() - self.fire_time >= FIRE_DELAY:
+                self.dispatch_fire_team()
+            return
+
+        # Laget er på vei: vent til begge er ved brannen.
+        for name in self.fire_team:
+            pos = self.robot_position(name)
+            if pos is None or math.hypot(pos[0] - self.fire_pos[0],
+                                         pos[1] - self.fire_pos[1]) > FIRE_RADIUS:
+                return
+
+        # Hjelperen fortsetter i regionen sin. Standby-roboten blir stående.
+        self.send_goal(self.fire_team[0], 'resume')
+        self.fire_team = None
+        self.fire_done = True
+        self.get_logger().info('Begge er ved brannen.')
 
     # ------------------------------------------------------------------
     # Visualisering

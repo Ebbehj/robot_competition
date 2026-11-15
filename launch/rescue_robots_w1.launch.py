@@ -19,12 +19,13 @@ def generate_launch_description():
     # Namespace of each robot
     # Name, x, y and yaw for each robot
     robots = [
-        ('tb3_0', '1.5', '1.0', '0.0'),
-        ('tb3_1', '0.25', '1.0', '0.0'),
+        ('tb3_0', '1.75', '1.0', '0.0'),
+        ('tb3_1', '0.35', '1.0', '0.0'),
         ('tb3_2', '-1.0', '1.0', '0.0'),
-        ('tb3_3', '1.5', '-1.0', '0.0'),
-        ('tb3_4', '0.25', '-1.0', '0.0'),
+        ('tb3_3', '1.75', '-1.0', '0.0'),
+        ('tb3_4', '0.35', '-1.0', '0.0'),
         ('tb3_5', '-1.0', '-1.0', '0.0'),
+        ('tb3_6', '-1.0', '-2.0', '0.0'),
 
         
     ]
@@ -54,7 +55,7 @@ def generate_launch_description():
     # Starting Gazebo
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([os.path.join(get_package_share_directory('gazebo_ros'), 'launch'), '/gazebo.launch.py']),
-        launch_arguments={'world': world_file_path}.items()
+        launch_arguments={'world': world_file_path, 'gui': 'false'}.items()
     )
 
    

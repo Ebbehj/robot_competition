@@ -202,17 +202,15 @@ class PathPlannerNode(Node):
         self.plan_to_goal(goal)
 
     def goal_callback(self, msg):
-        if msg.data == "region_peak":
-            region_peaks = self.get_region_peaks()
+        if msg.data == "resume":
+            # Continue with the peaks in the region
+            self.started = False
+            return
 
-            if region_peaks and self.positions:
-                self.plan_to_peak(region_peaks[0])
-            else:
-                self.get_logger().warning(
-                    "Ingen peaks funnet i robotens region."
-                )
-        else:
-            self.plan_to_goal(msg.data)
+        # A priority goal pauses the automatic peak navigation
+        self.started = True
+        self.awaiting_completion = False
+        self.plan_to_goal(msg.data)
 
     def plan_to_goal(self, goal):
         self.publish_route([])
