@@ -8,6 +8,7 @@ from rclpy.time import Time
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Empty
 from tf2_ros import Buffer, TransformException, TransformListener
+from sensor_msgs.msg import LaserScan
 
 
 def clamp(value, limit):
@@ -50,10 +51,16 @@ class PathFollowerNode(Node):
         self.max_pose_age = 0.5                    # Simuleringssekunder.
         self.lookahead_points = 5
 
+        # Placeholder for lidar verdi
+        self.lidar_front = 100
+        self.lidar_frontRight = 100
+        self.lidar_frontLeft = 100
+
         # Relative navn: blir f.eks. /tb3_2/cmd_vel med namespace tb3_2.
         self.cmd_publisher = self.create_publisher(Twist, "cmd_vel", 10)
         self.done_publisher = self.create_publisher(Empty, "route_completed", 10)
         self.create_subscription(String, "planned_path", self.route_callback, 10)
+        self.sub = self.create_subscription(LaserScan, "/scan", self.clbk_laser, 10)
 
         # TF gir robotens posisjon og retning i kartet.
         self.tf_buffer = Buffer()
@@ -66,6 +73,11 @@ class PathFollowerNode(Node):
 
     def stop_robot(self):
         self.cmd_publisher.publish(Twist())
+
+    def clbk_laser(self, msg):
+            self.lidar_front = msg.ranges[0]
+            self.lidar_frontRight = msg.ranges[330]
+            self.lidar_frontLeft = msg.ranges[30]
 
     # ------------------------------------------------------------------
     # Ruter
@@ -203,7 +215,12 @@ class PathFollowerNode(Node):
     def follow(self, angle_error, distance):
         """P-regulator: positiv vinkelfeil gir venstresving."""
         cmd = Twist()
-        cmd.angular.z = clamp(self.Kp * angle_error, self.max_angular_speed)
+
+        if max(self.lidar_front, self.lidar_frontLeft, self.lidar_frontRight) > 0.3:
+            cmd.angular.z = 2.0
+        else:
+            cmd.angular.z = clamp(self.Kp * angle_error, self.max_angular_speed)
+
         # Kjør saktere jo mer feil retning roboten peker.
         cmd.linear.x = (
             min(self.max_linear_speed, 0.5 * distance)
