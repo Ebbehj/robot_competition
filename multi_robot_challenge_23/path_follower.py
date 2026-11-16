@@ -75,7 +75,6 @@ class PathFollowerNode(Node):
         # Kjøres 10 ganger per simuleringssekund.
         self.create_timer(0.1, self.update)
 
-        self.get_logger().info(f"Rutefølger for {self.robot_name} venter på en rute.")
 
     def stop_robot(self):
         self.cmd_publisher.publish(Twist())
@@ -98,17 +97,14 @@ class PathFollowerNode(Node):
             self.route = []
             self.target_index = 0
             self.stop_robot()
-            self.get_logger().warning(f"Ugyldig rute: {error}")
             return
 
         self.route = route
         self.target_index = 0
 
         if not route:
-            self.get_logger().info("Mottok tom rute.")
             return
 
-        self.get_logger().info(f"Mottok {len(route)} rutepunkter.")
 
     @staticmethod
     def validate_route(route):
@@ -180,7 +176,6 @@ class PathFollowerNode(Node):
 
         # Ruten er fullført: be om neste rute med én gang, og ta en full runde.
         if self.target_index >= len(self.route):
-            self.get_logger().info("Hele ruten er fullført. Ser rundt.")
             self.route = []
             self.target_index = 0
             self.state = "spin"
@@ -209,7 +204,6 @@ class PathFollowerNode(Node):
             if distance > tolerance:
                 break
 
-            self.get_logger().info(f"Nådde punkt: {target['id']}")
             self.target_index += 1
 
     def aim(self, x, y, yaw):
@@ -249,7 +243,6 @@ class PathFollowerNode(Node):
         self.last_yaw = yaw
 
         if self.spin_remaining <= 0:
-            self.get_logger().info("Ferdig med å se rundt.")
             # Neste steg: pek mot neste rute før roboten kjører.
             self.state = "align"
             return
@@ -259,7 +252,6 @@ class PathFollowerNode(Node):
     def align(self, angle_error):
         """Snur korteste vei til roboten peker i retningen den skal kjøre."""
         if abs(angle_error) < self.align_threshold:
-            self.get_logger().info("Peker mot neste rute.")
             self.state = "follow_path"
             self.stop_robot()
             return
