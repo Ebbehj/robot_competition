@@ -56,8 +56,8 @@ class PathFollowerNode(Node):
         self.lookahead_points = 5
 
         # Innstillinger for snurring.
-        self.spin_speed = 1.0                      # rad/s, full runde ved et peak
-        self.idle_spin_speed = 0.8                 # rad/s, mens roboten venter på rute
+        self.spin_speed = 0.9                     # rad/s, full runde ved et peak
+        self.idle_spin_speed = 0.9              # rad/s, mens roboten venter på rute
         self.min_align_speed = 0.3                 # rad/s, så den ikke kryper på slutten
         self.align_threshold = math.radians(10)    # Nær nok riktig retning
         self.spin_remaining = 0.0
